@@ -206,21 +206,3 @@ Zomato-product-analytics/
 │   └── food.csv
 └── README.md
 ```
-
----
-
-## Skills Demonstrated (Portfolio)
-
-- **Product analytics:** Funnel-adjacent metrics (orders, AOV, repeat rate), segmentation, lifecycle (RFM)  
-- **Data engineering:** Multi-table joins, cleaning (CRLF in orders), caching, filter propagation  
-- **Visualization:** Executive dashboards, Pareto analysis, treemaps, dual-axis trends  
-- **Storytelling:** Auto-generated insights tied to measurable thresholds  
-- **Tooling:** Python analytics stack suitable for internal BI prototypes  
-
----
-
-## Author
-
-Built as a portfolio project demonstrating marketplace analytics for Product & Data Analyst interviews.
-
-**License:** For portfolio and educational use. Dataset is synthetic/sample-derived; not affiliated with Zomato Ltd.
