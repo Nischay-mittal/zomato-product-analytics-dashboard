@@ -616,44 +616,69 @@ h2, h3 {{
 
 
 # ---------------------------------------------------------------------------
-# Data loading (unchanged logic)
+# Data loading
 # ---------------------------------------------------------------------------
+def _select_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Keep only columns that exist in the frame."""
+    return df[[c for c in columns if c in df.columns]]
+
+
 @st.cache_data(show_spinner="Loading datasets…")
 def load_datasets() -> dict[str, pd.DataFrame]:
-    """Load and clean all CSV tables from /data."""
+    """Load and clean all CSV tables from /data (cached once per session)."""
     users = pd.read_csv(DATA_DIR / "users.csv", index_col=0)
     users = users.reset_index(drop=True)
-    users["user_id"] = users["user_id"].astype(int)
+    if "user_id" in users.columns:
+        users["user_id"] = users["user_id"].astype(int)
 
     restaurant = pd.read_csv(DATA_DIR / "restaurant.csv", index_col=0)
     restaurant = restaurant.reset_index(drop=True)
-    restaurant["id"] = pd.to_numeric(restaurant["id"], errors="coerce").astype("Int64")
-    restaurant["rating_num"] = pd.to_numeric(
-        restaurant["rating"].replace("--", pd.NA), errors="coerce"
-    )
+    if "id" in restaurant.columns:
+        restaurant["id"] = pd.to_numeric(restaurant["id"], errors="coerce").astype("Int64")
+    if "rating" in restaurant.columns:
+        restaurant["rating_num"] = pd.to_numeric(
+            restaurant["rating"].replace("--", pd.NA), errors="coerce"
+        )
 
     raw_orders = (DATA_DIR / "orders.csv").read_text(encoding="utf-8", errors="replace")
     raw_orders = raw_orders.replace("\r\n", "\n").replace("\r", "")
     orders = pd.read_csv(io.StringIO(raw_orders), index_col=0)
-    orders = orders.reset_index().rename(columns={"index": "order_id"})
-    orders["order_id"] = orders["order_id"].astype(int)
-    orders["order_date"] = pd.to_datetime(orders["order_date"], errors="coerce")
-    orders["sales_qty"] = pd.to_numeric(orders["sales_qty"], errors="coerce").fillna(0)
-    orders["sales_amount"] = pd.to_numeric(orders["sales_amount"], errors="coerce").fillna(0)
-    orders["user_id"] = pd.to_numeric(orders["user_id"], errors="coerce").astype("Int64")
-    orders["r_id"] = pd.to_numeric(orders["r_id"], errors="coerce").astype("Int64")
-    orders["currency"] = orders["currency"].astype(str).str.strip().str.upper()
-    orders = orders.dropna(subset=["order_date", "user_id"])
-    orders = orders[orders["sales_amount"] >= 0]
+    orders = orders.reset_index()
+    if "index" in orders.columns:
+        orders = orders.rename(columns={"index": "order_id"})
+    elif orders.columns[0] not in {"order_id", "order_date"}:
+        orders = orders.rename(columns={orders.columns[0]: "order_id"})
+    if "order_id" in orders.columns:
+        orders["order_id"] = orders["order_id"].astype(int)
+    if "order_date" in orders.columns:
+        orders["order_date"] = pd.to_datetime(orders["order_date"], errors="coerce")
+    if "sales_qty" in orders.columns:
+        orders["sales_qty"] = pd.to_numeric(orders["sales_qty"], errors="coerce").fillna(0)
+    if "sales_amount" in orders.columns:
+        orders["sales_amount"] = pd.to_numeric(orders["sales_amount"], errors="coerce").fillna(0)
+    if "user_id" in orders.columns:
+        orders["user_id"] = pd.to_numeric(orders["user_id"], errors="coerce").astype("Int64")
+    if "r_id" in orders.columns:
+        orders["r_id"] = pd.to_numeric(orders["r_id"], errors="coerce").astype("Int64")
+    if "currency" in orders.columns:
+        orders["currency"] = orders["currency"].astype(str).str.strip().str.upper()
+    orders = orders.dropna(subset=[c for c in ["order_date", "user_id"] if c in orders.columns])
+    if "sales_amount" in orders.columns:
+        orders = orders.loc[orders["sales_amount"] >= 0]
 
     menu = pd.read_csv(DATA_DIR / "menu.csv", index_col=0)
     menu = menu.reset_index(drop=True)
-    menu["r_id"] = pd.to_numeric(menu["r_id"], errors="coerce").astype("Int64")
-    menu["price"] = pd.to_numeric(menu["price"], errors="coerce")
+    menu = _select_columns(menu, ["menu_id", "r_id", "f_id", "price"])
+    if "r_id" in menu.columns:
+        menu["r_id"] = pd.to_numeric(menu["r_id"], errors="coerce").astype("Int64")
+    if "price" in menu.columns:
+        menu["price"] = pd.to_numeric(menu["price"], errors="coerce")
 
     food = pd.read_csv(DATA_DIR / "food.csv", index_col=0)
     food = food.reset_index(drop=True)
-    food["f_id"] = food["f_id"].astype(str)
+    food = _select_columns(food, ["f_id", "item", "veg_or_non_veg"])
+    if "f_id" in food.columns:
+        food["f_id"] = food["f_id"].astype(str)
 
     return {
         "users": users,
@@ -664,39 +689,57 @@ def load_datasets() -> dict[str, pd.DataFrame]:
     }
 
 
+@st.cache_data(show_spinner=False)
+def get_filter_options() -> tuple[tuple, tuple, object, object]:
+    """Cached metadata for sidebar controls (derived once from raw data)."""
+    data = load_datasets()
+    orders = data["orders"]
+    restaurant = data["restaurant"]
+    min_date = orders["order_date"].min().date()
+    max_date = orders["order_date"].max().date()
+    cities = tuple(sorted(restaurant["city"].dropna().unique().tolist()))
+    currencies = tuple(sorted(orders["currency"].dropna().unique().tolist()))
+    return cities, currencies, min_date, max_date
+
+
 def apply_filters(
     orders: pd.DataFrame,
     restaurant: pd.DataFrame,
     date_range: tuple,
-    cities: list[str],
-    currencies: list[str],
+    cities: tuple[str, ...],
+    currencies: tuple[str, ...],
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Filter orders (and aligned restaurants) by sidebar selections."""
-    o = orders.copy()
+    """Filter orders and restaurants without copying the full orders table."""
+    mask = pd.Series(True, index=orders.index)
     if date_range[0] and date_range[1]:
-        o = o[(o["order_date"] >= pd.Timestamp(date_range[0])) & (o["order_date"] <= pd.Timestamp(date_range[1]))]
+        start, end = pd.Timestamp(date_range[0]), pd.Timestamp(date_range[1])
+        mask &= (orders["order_date"] >= start) & (orders["order_date"] <= end)
     if currencies:
-        o = o[o["currency"].isin(currencies)]
+        mask &= orders["currency"].isin(currencies)
     if cities:
         valid_r = restaurant.loc[restaurant["city"].isin(cities), "id"].dropna().unique()
-        o = o[o["r_id"].isin(valid_r)]
-    r = restaurant[restaurant["id"].isin(o["r_id"].dropna().unique())].copy()
+        mask &= orders["r_id"].isin(valid_r)
+    o = orders.loc[mask]
+    r_ids = pd.unique(o["r_id"].dropna())
+    r = restaurant.loc[restaurant["id"].isin(r_ids)]
     return o, r
 
 
+_USER_COLS = ["user_id", "name", "Gender", "Occupation", "Monthly Income"]
+_REST_COLS = ["id", "name", "city", "rating", "rating_num", "cuisine", "cost"]
+_USERS_RFM_COLS = ["user_id", "name"]
+
+
+@st.cache_data(show_spinner="Preparing analytics…")
 def build_master(orders: pd.DataFrame, restaurant: pd.DataFrame, users: pd.DataFrame) -> pd.DataFrame:
     """Orders enriched with user and restaurant attributes."""
-    m = orders.merge(users, on="user_id", how="left", suffixes=("", "_user"))
-    m = m.merge(
-        restaurant,
-        left_on="r_id",
-        right_on="id",
-        how="left",
-        suffixes=("", "_rest"),
-    )
-    return m
+    ucols = [c for c in _USER_COLS if c in users.columns]
+    rcols = [c for c in _REST_COLS if c in restaurant.columns]
+    m = orders.merge(users[ucols], on="user_id", how="left")
+    return m.merge(restaurant[rcols], left_on="r_id", right_on="id", how="left")
 
 
+@st.cache_data(show_spinner=False)
 def build_food_metrics(
     orders: pd.DataFrame, menu: pd.DataFrame, food: pd.DataFrame
 ) -> pd.DataFrame:
@@ -711,34 +754,38 @@ def build_food_metrics(
     menu_rest = menu.merge(rest_orders, on="r_id", how="inner")
     menu_rest = menu_rest.dropna(subset=["price"])
     menu_rest = menu_rest[menu_rest["price"] > 0]
-    menu_rest["price_share"] = menu_rest.groupby("r_id")["price"].transform(lambda x: x / x.sum())
+    price_sum = menu_rest.groupby("r_id")["price"].transform("sum")
+    menu_rest["price_share"] = menu_rest["price"] / price_sum
     menu_rest["attrib_orders"] = menu_rest["order_count"] * menu_rest["price_share"]
     menu_rest["attrib_revenue"] = menu_rest["revenue"] * menu_rest["price_share"]
     menu_rest["attrib_units"] = menu_rest["units"] * menu_rest["price_share"]
-    item = (
-        menu_rest.groupby("f_id", as_index=False)
-        .agg(
-            attrib_orders=("attrib_orders", "sum"),
-            attrib_revenue=("attrib_revenue", "sum"),
-            attrib_units=("attrib_units", "sum"),
-            listings=("menu_id", "nunique"),
-        )
-    )
-    item = item.merge(food, on="f_id", how="left")
-    item["category"] = item["veg_or_non_veg"].fillna("Unknown")
+    agg_spec = {
+        "attrib_orders": ("attrib_orders", "sum"),
+        "attrib_revenue": ("attrib_revenue", "sum"),
+        "attrib_units": ("attrib_units", "sum"),
+    }
+    if "menu_id" in menu_rest.columns:
+        agg_spec["listings"] = ("menu_id", "nunique")
+    else:
+        agg_spec["listings"] = ("f_id", "count")
+    item = menu_rest.groupby("f_id", as_index=False).agg(**agg_spec)
+    food_cols = [c for c in ["f_id", "item", "veg_or_non_veg"] if c in food.columns]
+    item = item.merge(food[food_cols], on="f_id", how="left")
+    if "veg_or_non_veg" in item.columns:
+        item["category"] = item["veg_or_non_veg"].fillna("Unknown")
+    else:
+        item["category"] = "Unknown"
     return item
 
 
-def compute_rfm(orders: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def compute_rfm(orders: pd.DataFrame, as_of_iso: str) -> pd.DataFrame:
     """RFM scores and segments per customer."""
-    rfm = (
-        orders.groupby("user_id")
-        .agg(
-            last_order=("order_date", "max"),
-            frequency=("order_id", "nunique"),
-            monetary=("sales_amount", "sum"),
-        )
-        .reset_index()
+    as_of = pd.Timestamp(as_of_iso)
+    rfm = orders.groupby("user_id", as_index=False).agg(
+        last_order=("order_date", "max"),
+        frequency=("order_id", "nunique"),
+        monetary=("sales_amount", "sum"),
     )
     rfm["recency_days"] = (as_of - rfm["last_order"]).dt.days
     rfm["R"] = pd.qcut(rfm["recency_days"].rank(method="first"), 5, labels=[5, 4, 3, 2, 1])
@@ -767,6 +814,111 @@ def compute_rfm(orders: pd.DataFrame, as_of: pd.Timestamp) -> pd.DataFrame:
     return rfm
 
 
+@st.cache_data(show_spinner=False)
+def chart_monthly_trend(orders: pd.DataFrame) -> pd.DataFrame:
+    """Cached monthly revenue and order counts for charts."""
+    trend = orders.set_index("order_date").resample("MS").agg(
+        revenue=("sales_amount", "sum"),
+        orders=("order_id", "count"),
+    )
+    trend = trend.reset_index()
+    trend["month"] = trend["order_date"].dt.strftime("%b %Y")
+    return trend
+
+
+@st.cache_data(show_spinner=False)
+def chart_customer_agg(orders: pd.DataFrame, users: pd.DataFrame) -> pd.DataFrame:
+    """Cached per-customer order and revenue aggregates."""
+    cust = orders.groupby("user_id", as_index=False).agg(
+        orders=("order_id", "count"),
+        revenue=("sales_amount", "sum"),
+    )
+    ucols = [c for c in _USER_COLS if c in users.columns]
+    return cust.merge(users[ucols], on="user_id", how="left")
+
+
+@st.cache_data(show_spinner=False)
+def chart_restaurant_agg(orders: pd.DataFrame, restaurant: pd.DataFrame) -> pd.DataFrame:
+    """Cached per-restaurant performance table."""
+    rest = orders.groupby("r_id", as_index=False).agg(
+        revenue=("sales_amount", "sum"),
+        orders=("order_id", "count"),
+    )
+    rcols = [c for c in ["id", "name", "city", "rating"] if c in restaurant.columns]
+    return rest.merge(restaurant[rcols], left_on="r_id", right_on="id", how="left")
+
+
+@st.cache_data(show_spinner=False)
+def chart_city_agg(master: pd.DataFrame) -> pd.DataFrame:
+    """Cached city-level revenue and orders."""
+    city = master.groupby("city", as_index=False).agg(
+        revenue=("sales_amount", "sum"),
+        orders=("order_id", "count"),
+    )
+    return city.nlargest(20, "revenue")
+
+
+@st.cache_data(show_spinner=False)
+def chart_food_category_agg(food_metrics: pd.DataFrame) -> pd.DataFrame:
+    """Cached category-level attributed metrics."""
+    return food_metrics.groupby("category", as_index=False).agg(
+        revenue=("attrib_revenue", "sum"),
+        orders=("attrib_orders", "sum"),
+    )
+
+
+def mom_growth(series: pd.Series) -> float | None:
+    if len(series) < 2 or series.iloc[-2] == 0:
+        return None
+    return (series.iloc[-1] - series.iloc[-2]) / series.iloc[-2] * 100
+
+
+@st.cache_data(show_spinner=False)
+def compute_growth_metrics(orders: pd.DataFrame) -> tuple[float | None, float | None, float]:
+    """Cached MoM revenue, MoM customers, and repeat purchase rate."""
+    monthly_rev = orders.set_index("order_date").resample("MS")["sales_amount"].sum()
+    monthly_users = orders.set_index("order_date").resample("MS")["user_id"].nunique()
+    rev_growth = mom_growth(monthly_rev)
+    cust_growth = mom_growth(monthly_users)
+    repeat_rate = (orders.groupby("user_id").size() > 1).mean() * 100
+    return rev_growth, cust_growth, repeat_rate
+
+
+@st.cache_data(show_spinner=False)
+def prepare_analytics(
+    date_start: str,
+    date_end: str,
+    cities: tuple[str, ...],
+    currencies: tuple[str, ...],
+) -> dict:
+    """Single cached pipeline: filter → joins → RFM → chart-ready aggregates."""
+    data = load_datasets()
+    dr = (pd.Timestamp(date_start).date(), pd.Timestamp(date_end).date())
+    orders, restaurant_f = apply_filters(data["orders"], data["restaurant"], dr, cities, currencies)
+    master = build_master(orders, data["restaurant"], data["users"])
+    food_metrics = build_food_metrics(orders, data["menu"], data["food"])
+    as_of = pd.Timestamp(date_end)
+    rfm = compute_rfm(orders, as_of.isoformat())
+    rfm = rfm.merge(data["users"][_USERS_RFM_COLS], on="user_id", how="left")
+    rev_growth, cust_growth, repeat_rate = compute_growth_metrics(orders)
+    return {
+        "orders": orders,
+        "restaurant_f": restaurant_f,
+        "master": master,
+        "food_metrics": food_metrics,
+        "rfm": rfm,
+        "rev_growth": rev_growth,
+        "cust_growth": cust_growth,
+        "repeat_rate": repeat_rate,
+        "monthly_trend": chart_monthly_trend(orders),
+        "customer_agg": chart_customer_agg(orders, data["users"]),
+        "restaurant_agg": chart_restaurant_agg(orders, restaurant_f),
+        "city_agg": chart_city_agg(master),
+        "food_category_agg": chart_food_category_agg(food_metrics),
+    }
+
+
+@st.cache_data(show_spinner=False)
 def generate_insights(
     orders: pd.DataFrame,
     master: pd.DataFrame,
@@ -1039,21 +1191,6 @@ def rfm_segment_cards(rfm: pd.DataFrame) -> None:
     render_html("".join(cards))
 
 
-def mom_growth(series: pd.Series) -> float | None:
-    if len(series) < 2 or series.iloc[-2] == 0:
-        return None
-    return (series.iloc[-1] - series.iloc[-2]) / series.iloc[-2] * 100
-
-
-def period_compare_users(orders: pd.DataFrame) -> float | None:
-    monthly_users = orders.set_index("order_date").resample("MS")["user_id"].nunique()
-    return mom_growth(monthly_users)
-
-
-def repeat_purchase_rate(orders: pd.DataFrame) -> float:
-    return (orders.groupby("user_id").size() > 1).mean() * 100
-
-
 def top_city_label(master: pd.DataFrame) -> str:
     top = master.groupby("city")["sales_amount"].sum().sort_values(ascending=False).head(1)
     if len(top):
@@ -1064,17 +1201,7 @@ def top_city_label(master: pd.DataFrame) -> str:
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-data = load_datasets()
-users = data["users"]
-restaurant = data["restaurant"]
-orders_all = data["orders"]
-menu = data["menu"]
-food = data["food"]
-
-min_date = orders_all["order_date"].min().date()
-max_date = orders_all["order_date"].max().date()
-city_options = sorted(restaurant["city"].dropna().unique().tolist())
-currency_options = sorted(orders_all["currency"].dropna().unique().tolist())
+city_options, currency_options, min_date, max_date = get_filter_options()
 
 render_html(
     '<div class="sidebar-logo"><div class="sidebar-logo-icon">🍽️</div>'
@@ -1107,10 +1234,10 @@ date_range = st.sidebar.date_input(
     label_visibility="collapsed",
 )
 render_html('<p class="filter-card-title">Geography</p>', sidebar=True)
-selected_cities = st.sidebar.multiselect("City", options=city_options, default=[], label_visibility="collapsed")
+selected_cities = st.sidebar.multiselect("City", options=list(city_options), default=[], label_visibility="collapsed")
 render_html('<p class="filter-card-title">Currency</p>', sidebar=True)
 selected_currencies = st.sidebar.multiselect(
-    "Currency", options=currency_options, default=currency_options, label_visibility="collapsed"
+    "Currency", options=list(currency_options), default=list(currency_options), label_visibility="collapsed"
 )
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
@@ -1118,17 +1245,22 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
 else:
     dr = (min_date, max_date)
 
-orders, restaurant_f = apply_filters(orders_all, restaurant, dr, selected_cities, selected_currencies)
-master = build_master(orders, restaurant_f, users)
-food_metrics = build_food_metrics(orders, menu, food)
-as_of = pd.Timestamp(dr[1]) if dr[1] else orders["order_date"].max()
-rfm = compute_rfm(orders, as_of)
-rfm = rfm.merge(users[["user_id", "name"]], on="user_id", how="left")
-
-monthly_rev = orders.set_index("order_date").resample("MS")["sales_amount"].sum()
-rev_growth = mom_growth(monthly_rev)
-cust_growth = period_compare_users(orders)
-repeat_rate = repeat_purchase_rate(orders)
+_cities_key = tuple(sorted(selected_cities))
+_currencies_key = tuple(sorted(selected_currencies))
+_analytics = prepare_analytics(
+    pd.Timestamp(dr[0]).isoformat(),
+    pd.Timestamp(dr[1]).isoformat(),
+    _cities_key,
+    _currencies_key,
+)
+orders = _analytics["orders"]
+restaurant_f = _analytics["restaurant_f"]
+master = _analytics["master"]
+food_metrics = _analytics["food_metrics"]
+rfm = _analytics["rfm"]
+rev_growth = _analytics["rev_growth"]
+cust_growth = _analytics["cust_growth"]
+repeat_rate = _analytics["repeat_rate"]
 
 # ---------------------------------------------------------------------------
 # Pages
@@ -1157,7 +1289,7 @@ if page == "Executive Dashboard":
     total_orders = len(orders)
     total_customers = orders["user_id"].nunique()
     aov = total_rev / total_orders if total_orders else 0
-    monthly_ord = orders.set_index("order_date").resample("MS")["order_id"].count()
+    monthly_ord = _analytics["monthly_trend"]["orders"]
 
     section_header("Key performance indicators", "Headline metrics for the selected period")
     kpi_cards(
@@ -1172,13 +1304,7 @@ if page == "Executive Dashboard":
     divider()
     section_header("Performance trends", "Monthly revenue and order volume")
 
-    trend = (
-        orders.set_index("order_date")
-        .resample("MS")
-        .agg(revenue=("sales_amount", "sum"), orders=("order_id", "count"))
-        .reset_index()
-    )
-    trend["month"] = trend["order_date"].dt.strftime("%b %Y")
+    trend = _analytics["monthly_trend"]
 
     c1, c2 = st.columns(2)
     with c1:
@@ -1210,12 +1336,7 @@ elif page == "Customer Analytics":
         "Customer Intelligence",
     )
 
-    cust = (
-        orders.groupby("user_id")
-        .agg(orders=("order_id", "count"), revenue=("sales_amount", "sum"))
-        .reset_index()
-        .merge(users[["user_id", "name", "Gender", "Occupation", "Monthly Income"]], on="user_id", how="left")
-    )
+    cust = _analytics["customer_agg"]
 
     section_header("Customer value", "Top contributors by revenue")
     top = cust.nlargest(15, "revenue")
@@ -1266,12 +1387,7 @@ elif page == "Restaurant Analytics":
         "Partner Intelligence",
     )
 
-    rest = (
-        orders.groupby("r_id")
-        .agg(revenue=("sales_amount", "sum"), orders=("order_id", "count"))
-        .reset_index()
-        .merge(restaurant_f[["id", "name", "city", "rating"]], left_on="r_id", right_on="id", how="left")
-    )
+    rest = _analytics["restaurant_agg"]
 
     section_header("Leaderboards", "Top partners by revenue and volume")
     c1, c2 = st.columns(2)
@@ -1311,12 +1427,7 @@ elif page == "Restaurant Analytics":
     chart_panel(fig_p)
 
     section_header("Geographic performance", "City-level demand map")
-    city_perf = (
-        master.groupby("city")
-        .agg(revenue=("sales_amount", "sum"), orders=("order_id", "count"))
-        .reset_index()
-        .nlargest(20, "revenue")
-    )
+    city_perf = _analytics["city_agg"]
     fig_city = px.scatter(
         city_perf,
         x="orders",
@@ -1342,7 +1453,7 @@ elif page == "Food Analytics":
         "Catalog Intelligence",
     )
 
-    fm = food_metrics.dropna(subset=["item"]).copy()
+    fm = food_metrics.dropna(subset=["item"])
 
     section_header("Item performance", "Attributed orders and revenue")
     c1, c2 = st.columns(2)
@@ -1375,7 +1486,7 @@ elif page == "Food Analytics":
         chart_panel(fig2, 460)
 
     section_header("Category performance", "Veg / non-veg and catalog mix")
-    cat = fm.groupby("category").agg(revenue=("attrib_revenue", "sum"), orders=("attrib_orders", "sum")).reset_index()
+    cat = _analytics["food_category_agg"]
     c3, c4 = st.columns(2)
     with c3:
         fig_cat = px.pie(cat, names="category", values="revenue", hole=0.45, color_discrete_sequence=CHART_COLORS)
@@ -1499,12 +1610,7 @@ else:
 
     divider()
     section_header("Supporting evidence", "Monthly revenue vs orders")
-    trend = (
-        orders.set_index("order_date")
-        .resample("MS")
-        .agg(revenue=("sales_amount", "sum"), orders=("order_id", "count"))
-        .reset_index()
-    )
+    trend = _analytics["monthly_trend"]
     fig = go.Figure()
     fig.add_trace(
         go.Bar(
