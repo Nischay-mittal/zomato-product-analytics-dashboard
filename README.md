@@ -190,32 +190,7 @@ Open the URL shown in the terminal (default: **http://localhost:8501**).
 
 ---
 
-## Screenshots
 
-> Add screenshots to a `/docs` or `/assets` folder and link them here for your portfolio.
-
-| View | Description |
-|------|-------------|
-| `docs/executive-dashboard.png` | Executive hero, summary pills, KPI cards, revenue trend |
-| `docs/customer-analytics.png` | Top customers, repeat purchase, segmentation treemap |
-| `docs/restaurant-analytics.png` | Partner leaderboards and Pareto curve |
-| `docs/food-analytics.png` | Attributed item and category performance |
-| `docs/rfm-analysis.png` | Segment cards and RFM scatter |
-| `docs/business-insights.png` | Insight cards and supporting chart |
-
-**Placeholder layout**
-
-```
-docs/
-├── executive-dashboard.png
-├── customer-analytics.png
-├── restaurant-analytics.png
-├── food-analytics.png
-├── rfm-analysis.png
-└── business-insights.png
-```
-
----
 
 ## Project Structure
 
