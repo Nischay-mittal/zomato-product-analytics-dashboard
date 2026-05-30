@@ -3,6 +3,9 @@
 A production-style **product analytics platform** built with Streamlit and Plotly. This project turns marketplace transaction data into executive-ready KPIs, customer lifecycle segments, partner performance views, and actionable business insights—designed to demonstrate end-to-end analytics thinking for **Product Analyst** and **Data Analyst** roles.
 
 ---
+## Live Demo 
+
+https://zomato-appuct-analytics-dashboard-fdspucxujzv4gfqufdv8q3.streamlit.app
 
 ## Overview
 
